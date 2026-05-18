@@ -8,6 +8,9 @@ class FolderOrganizer:
         "Images": {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg"},
         "Documents": {".pdf", ".docx", ".doc", ".txt", ".xlsx", ".pptx", ".rtf"},
         "Videos": {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv"},
+        "Audio": {".mp3", ".wav", ".aac", ".flac"},
+        "Archives": {".zip", ".rar", ".7z", ".tar"},
+        "Code": {".py", ".java", ".cpp", ".js", ".html", ".css", ".sql"},
         "Others": set()
     }
 
@@ -18,6 +21,9 @@ class FolderOrganizer:
             "Images": "#38bdf8",
             "Documents": "#c084fc",
             "Videos": "#fb7185",
+            "Audio": "#06b6d4",
+            "Archives": "#f97316",
+            "Code": "#16a34a",
             "Others": "#facc15"
         }.get(category, "#94a3b8")
 
@@ -32,11 +38,15 @@ class FolderOrganizer:
                 continue
 
             if item.is_file():
-                category = self._classify_file(item.suffix.lower())
+                category = self._classify_file(item.name.lower())
                 counts[category] += 1
         return counts
 
-    def organize_folder(self, folder_path: str) -> tuple[dict[str, int], list[dict[str, str]]]:
+    def organize_folder(
+        self,
+        folder_path: str,
+        progress_callback=None
+    ) -> tuple[dict[str, int], list[dict[str, str]]]:
         path = Path(folder_path)
         if not path.is_dir():
             raise ValueError("Folder path must be a directory.")
@@ -45,8 +55,8 @@ class FolderOrganizer:
         counts = {category: 0 for category in self.CATEGORY_EXTENSIONS}
         moved_files: list[dict[str, str]] = []
 
-        for item in files:
-            category = self._classify_file(item.suffix.lower())
+        for index, item in enumerate(files, start=1):
+            category = self._classify_file(item.name.lower())
             destination_folder = path / category
             destination_folder.mkdir(parents=True, exist_ok=True)
 
@@ -64,6 +74,9 @@ class FolderOrganizer:
                     "destination": str(destination)
                 }
             )
+
+            if progress_callback is not None:
+                progress_callback(index, len(files))
 
         return counts, moved_files
 
@@ -91,8 +104,9 @@ class FolderOrganizer:
 
         return False
 
-    def _classify_file(self, extension: str) -> str:
+    def _classify_file(self, name: str) -> str:
         for category, extensions in self.CATEGORY_EXTENSIONS.items():
-            if extension in extensions:
-                return category
+            for ext in extensions:
+                if name.endswith(ext):
+                    return category
         return "Others"

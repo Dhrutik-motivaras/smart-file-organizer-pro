@@ -16,7 +16,6 @@ class App(ctk.CTk):
         self.title("Smart File Organizer Pro")
         self.geometry("1200x700")
         self.minsize(1000, 600)
-
         self._configure_theme()
         self._configure_root_grid()
 

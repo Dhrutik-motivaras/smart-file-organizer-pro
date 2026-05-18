@@ -1,4 +1,5 @@
 import os
+import threading
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox
@@ -106,6 +107,41 @@ class Dashboard(ctk.CTkFrame):
         )
         self.organize_button.grid(row=0, column=1)
 
+        self.progress_frame = ctk.CTkFrame(control_frame, fg_color="#111827")
+        self.progress_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=20, pady=(0, 12))
+        self.progress_frame.grid_columnconfigure(0, weight=1)
+        self.progress_frame.grid_columnconfigure(1, weight=0)
+
+        self.progress_bar = ctk.CTkProgressBar(
+            self.progress_frame,
+            orientation="horizontal",
+            mode="determinate",
+            width=1
+        )
+        self.progress_bar.grid(row=0, column=0, sticky="ew", pady=(12, 8), padx=(0, 12))
+        self.progress_bar.set(0)
+
+        self.progress_percent_label = ctk.CTkLabel(
+            self.progress_frame,
+            text="0%",
+            font=("Segoe UI", 12, "bold"),
+            text_color="#f8fafc"
+        )
+        self.progress_percent_label.grid(row=0, column=1, sticky="e", pady=(12, 8))
+
+        self.progress_status_label = ctk.CTkLabel(
+            self.progress_frame,
+            text="Ready to organize",
+            font=("Segoe UI", 12),
+            text_color="#cbd5e1"
+        )
+        self.progress_status_label.grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 12))
+
+        self._progress_value = 0.0
+        self._progress_animation_target = 0.0
+        self._progress_animation_running = False
+        self._last_logged_percent = -1
+
     def _build_stats_cards(self) -> None:
         stats_frame = ctk.CTkFrame(self, corner_radius=20, fg_color="#111827")
         stats_frame.grid(row=2, column=0, sticky="nsew", pady=(0, 20))
@@ -160,7 +196,10 @@ class Dashboard(ctk.CTkFrame):
             fg_color="#0f172a",
             text_color="#e2e8f0",
             border_width=0,
-            font=("Segoe UI", 12)
+            font=("Segoe UI", 12),
+            width=1,
+            height=200,
+            wrap="word"
         )
         self.activity_text.grid(row=1, column=0, sticky="nsew", padx=20, pady=(0, 20))
         self.activity_text.configure(state="disabled")
@@ -185,6 +224,7 @@ class Dashboard(ctk.CTkFrame):
 
         counts = self.organizer.scan_folder(self.selected_folder)
         self._update_stats(counts)
+        self._set_progress(0, sum(counts.values()))
         self._log_activity(f"Selected folder: {self.selected_folder}")
 
     def _organize_files(self) -> None:
@@ -193,28 +233,111 @@ class Dashboard(ctk.CTkFrame):
             self._log_activity("Organization failed: No folder selected.")
             return
 
-        try:
-            self._log_activity(f"Started organizing files in: {self.selected_folder}")
-            counts, moved_files = self.organizer.organize_folder(self.selected_folder)
-            self._update_stats(counts)
+        counts = self.organizer.scan_folder(self.selected_folder)
+        total_files = sum(counts.values())
+        if total_files == 0:
+            messagebox.showinfo("No files", "No files were found to organize.")
+            self._log_activity("No files found to organize.")
+            self._set_progress(0, 0)
+            return
 
-            if self.db_manager is not None:
-                for file_info in moved_files:
-                    self.db_manager.insert_log(
-                        file_name=file_info["file_name"],
-                        category=file_info["category"],
-                        destination=file_info["destination"]
-                    )
-                self._log_activity(f"Saved {len(moved_files)} history records.")
+        self.organize_button.configure(state="disabled")
+        self._last_logged_percent = -1
+        self._set_progress(0, total_files)
+        self.progress_status_label.configure(text="Organizing files...")
+        self._log_activity(f"Started organizing files in: {self.selected_folder}")
 
-            self._log_activity("File organization completed successfully.")
-            messagebox.showinfo("Success", "Files organized successfully.")
-        except PermissionError:
-            messagebox.showerror("Permission Error", "Access denied while organizing files.")
-            self._log_activity("Permission error occurred.")
-        except Exception as error:
-            messagebox.showerror("Error", f"Unexpected Error:\n{error}")
-            self._log_activity(f"Unexpected error: {error}")
+        def worker() -> None:
+            try:
+                counts, moved_files = self.organizer.organize_folder(
+                    self.selected_folder,
+                    progress_callback=self._thread_progress_update
+                )
+                self.after(0, self._on_organize_complete, counts, moved_files)
+            except PermissionError:
+                self.after(0, self._on_organize_error, PermissionError("Access denied while organizing files."))
+            except Exception as error:
+                self.after(0, self._on_organize_error, error)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _thread_progress_update(self, completed: int, total: int) -> None:
+        self.after(0, self._set_progress, completed, total)
+        self.after(0, self._log_progress, completed, total)
+
+    def _log_progress(self, completed: int, total: int) -> None:
+        if not total:
+            return
+
+        percent = int((completed / total) * 100)
+        if percent == self._last_logged_percent:
+            return
+
+        should_log = False
+        if total <= 20:
+            should_log = True
+        elif percent == 100:
+            should_log = True
+        elif percent % 10 == 0:
+            should_log = True
+
+        if should_log:
+            self._log_activity(f"Organized {completed}/{total} files ({percent}%)")
+            self._last_logged_percent = percent
+
+    def _on_organize_complete(self, counts: dict[str, int], moved_files: list[dict[str, str]]) -> None:
+        self._update_stats(counts)
+
+        if self.db_manager is not None:
+            for file_info in moved_files:
+                self.db_manager.insert_log(
+                    file_name=file_info["file_name"],
+                    category=file_info["category"],
+                    destination=file_info["destination"]
+                )
+            self._log_activity(f"Saved {len(moved_files)} history records.")
+
+        self._set_progress(sum(counts.values()), sum(counts.values()))
+        self.progress_status_label.configure(text="File organization completed")
+        self.organize_button.configure(state="normal")
+        self._log_activity("File organization completed successfully.")
+        self._show_summary_popup(counts)
+
+    def _on_organize_error(self, error: Exception) -> None:
+        self.organize_button.configure(state="normal")
+        self.progress_status_label.configure(text="Organization failed")
+        self._log_activity(f"Unexpected error: {error}")
+        messagebox.showerror("Error", f"Unexpected Error:\n{error}")
+
+    def _set_progress(self, completed: int, total: int) -> None:
+        progress = (completed / total) if total else 0.0
+        progress = min(max(progress, 0.0), 1.0)
+        self.progress_percent_label.configure(text=f"{int(progress * 100)}%")
+        self.progress_status_label.configure(
+            text=(f"Organized {completed}/{total} files" if total else "Ready to organize")
+        )
+        self._animate_progress_to(progress)
+
+    def _animate_progress_to(self, target: float) -> None:
+        self._progress_animation_target = target
+        if self._progress_animation_running:
+            return
+        self._progress_animation_running = True
+        self._step_progress_animation()
+
+    def _step_progress_animation(self) -> None:
+        current = self._progress_value
+        target = self._progress_animation_target
+        diff = target - current
+        if abs(diff) < 0.01:
+            self._progress_value = target
+            self.progress_bar.set(target)
+            self._progress_animation_running = False
+            return
+
+        self._progress_value = current + diff * 0.25
+        self.progress_bar.set(self._progress_value)
+        self.after(16, self._step_progress_animation)
 
     def _update_stats(self, counts: dict[str, int]) -> None:
         for category, count in counts.items():
@@ -226,6 +349,88 @@ class Dashboard(ctk.CTkFrame):
     def _shorten_path(path: Path, max_length: int = 60) -> str:
         text = str(path)
         return text if len(text) <= max_length else f"...{text[-(max_length - 3):]}"
+
+    def _show_summary_popup(self, counts: dict[str, int]) -> None:
+        total_files = sum(counts.values())
+        summary_dialog = ctk.CTkToplevel(self)
+        summary_dialog.title("Organization Summary")
+        summary_dialog.geometry("520x480")
+        summary_dialog.resizable(False, False)
+        summary_dialog.transient(self)
+        summary_dialog.grab_set()
+        summary_dialog.configure(fg_color="#111827")
+        summary_dialog.grid_columnconfigure(0, weight=1)
+        summary_dialog.grid_rowconfigure(2, weight=1)
+
+        summary_header = ctk.CTkLabel(
+            summary_dialog,
+            text="Organization Summary",
+            font=("Segoe UI", 20, "bold"),
+            text_color="#f8fafc"
+        )
+        summary_header.grid(row=0, column=0, sticky="w", padx=24, pady=(24, 8))
+
+        summary_subtitle = ctk.CTkLabel(
+            summary_dialog,
+            text=f"{total_files} files organized successfully.",
+            font=("Segoe UI", 13),
+            text_color="#cbd5e1"
+        )
+        summary_subtitle.grid(row=1, column=0, sticky="w", padx=24, pady=(0, 20))
+
+        content_frame = ctk.CTkFrame(summary_dialog, corner_radius=18, fg_color="#1f2937")
+        content_frame.grid(row=2, column=0, sticky="nsew", padx=24, pady=(0, 20))
+        content_frame.grid_columnconfigure(0, weight=1)
+        content_frame.grid_rowconfigure(0, weight=1)
+
+        visible_counts = [(category, count) for category, count in counts.items() if count > 0]
+        if not visible_counts:
+            empty_summary = ctk.CTkLabel(
+                content_frame,
+                text="No files were organized.",
+                font=("Segoe UI", 13),
+                text_color="#94a3b8"
+            )
+            empty_summary.grid(row=0, column=0, sticky="w", padx=12, pady=14)
+        else:
+            for index, (category, count) in enumerate(visible_counts):
+                row_color = self.organizer.category_color(category)
+                category_frame = ctk.CTkFrame(
+                    content_frame,
+                    corner_radius=16,
+                    fg_color="#0f172a",
+                    border_width=1,
+                    border_color="#334155"
+                )
+                category_frame.grid(row=index, column=0, sticky="ew", padx=12, pady=10)
+                category_frame.grid_columnconfigure(1, weight=1)
+
+                category_label = ctk.CTkLabel(
+                    category_frame,
+                    text=category,
+                    font=("Segoe UI", 12, "bold"),
+                    text_color=row_color
+                )
+                category_label.grid(row=0, column=0, sticky="w", padx=14, pady=14)
+
+                count_label = ctk.CTkLabel(
+                    category_frame,
+                    text=str(count),
+                    font=("Segoe UI", 14, "bold"),
+                    text_color="#e2e8f0"
+                )
+                count_label.grid(row=0, column=1, sticky="e", padx=14, pady=14)
+
+        close_button = ctk.CTkButton(
+            summary_dialog,
+            text="Close",
+            width=120,
+            fg_color="#22c55e",
+            hover_color="#4ade80",
+            command=summary_dialog.destroy,
+            font=("Segoe UI", 12, "bold")
+        )
+        close_button.grid(row=3, column=0, sticky="e", padx=24, pady=(0, 24))
 
     def _log_activity(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
